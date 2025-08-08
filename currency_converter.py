@@ -196,8 +196,8 @@ class CurrencyConverter:
 
     def get_historical_rates(self, from_currency: str, to_currency: str, days: int = 30) -> Optional[Tuple[List[str], List[float]]]:
         """
-        Fetch historical exchange rates for the given currency pair.
-        For now, returns simulated data since free historical APIs are unreliable.
+        Fetch real historical exchange rates for the given currency pair.
+        Uses multiple free APIs with fallback to simulated data.
         """
         from_currency = from_currency.upper()
         to_currency = to_currency.upper()
@@ -205,6 +205,106 @@ class CurrencyConverter:
         if from_currency not in self.supported_currencies or to_currency not in self.supported_currencies:
             return None
 
+        # Try multiple free APIs in order of preference
+        apis_to_try = [
+            self._try_exchangerate_host,
+            self._try_frankfurter_api,
+            self._try_simulated_data  # Fallback
+        ]
+
+        for api_func in apis_to_try:
+            try:
+                result = api_func(from_currency, to_currency, days)
+                if result:
+                    return result
+            except Exception as e:
+                self.logger.warning(
+                    f"historical_api_failed_{api_func.__name__}",
+                    extra={
+                        "from_currency": from_currency,
+                        "to_currency": to_currency,
+                        "error": str(e),
+                    },
+                )
+                continue
+
+        return None
+
+    def _try_exchangerate_host(self, from_currency: str, to_currency: str, days: int) -> Optional[Tuple[List[str], List[float]]]:
+        """Try ExchangeRate.host API (free, no key required)"""
+        try:
+            end_date = datetime.utcnow().date()
+            start_date = end_date - timedelta(days=days - 1)
+            
+            url = "https://api.exchangerate.host/timeseries"
+            params = {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "base": from_currency,
+                "symbols": to_currency,
+            }
+            
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data or not data.get("rates"):
+                return None
+
+            rate_map = {}
+            for date_str, rate_obj in data.get("rates", {}).items():
+                rate_value = rate_obj.get(to_currency)
+                if rate_value is not None:
+                    rate_map[date_str] = float(rate_value)
+
+            dates_sorted = sorted(rate_map.keys())
+            rates_sorted = [rate_map[d] for d in dates_sorted]
+            
+            if dates_sorted and rates_sorted:
+                return dates_sorted, rates_sorted
+                
+        except Exception as e:
+            self.logger.debug(f"exchangerate_host_failed: {e}")
+        
+        return None
+
+    def _try_frankfurter_api(self, from_currency: str, to_currency: str, days: int) -> Optional[Tuple[List[str], List[float]]]:
+        """Try Frankfurter API (free, no key required)"""
+        try:
+            end_date = datetime.utcnow().date()
+            start_date = end_date - timedelta(days=days - 1)
+            
+            url = f"https://api.frankfurter.app/{start_date.isoformat()}..{end_date.isoformat()}"
+            params = {
+                "from": from_currency,
+                "to": to_currency,
+            }
+            
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data or not data.get("rates"):
+                return None
+
+            dates = []
+            rates = []
+            for date_str, rate_obj in data.get("rates", {}).items():
+                rate_value = rate_obj.get(to_currency)
+                if rate_value is not None:
+                    dates.append(date_str)
+                    rates.append(float(rate_value))
+
+            if dates and rates:
+                return dates, rates
+                
+        except Exception as e:
+            self.logger.debug(f"frankfurter_api_failed: {e}")
+        
+        return None
+
+    def _try_simulated_data(self, from_currency: str, to_currency: str, days: int) -> Optional[Tuple[List[str], List[float]]]:
+        """Fallback to simulated data based on current rate"""
         try:
             # Get current rate first
             current_rates = self.get_exchange_rates(from_currency)
@@ -213,7 +313,7 @@ class CurrencyConverter:
             
             current_rate = current_rates['rates'][to_currency]
             
-            # Generate simulated historical data with some variation
+            # Generate realistic simulated data with some variation
             import random
             dates = []
             rates = []
@@ -223,24 +323,20 @@ class CurrencyConverter:
                 date = base_date - timedelta(days=days - 1 - i)
                 dates.append(date.isoformat())
                 
-                # Add some realistic variation (±5%)
-                variation = random.uniform(-0.05, 0.05)
+                # Add realistic variation (±3% for most days, occasional larger moves)
+                if random.random() < 0.1:  # 10% chance of larger move
+                    variation = random.uniform(-0.08, 0.08)
+                else:
+                    variation = random.uniform(-0.03, 0.03)
                 rate = current_rate * (1 + variation)
                 rates.append(round(rate, 4))
             
             return dates, rates
             
         except Exception as e:
-            self.logger.warning(
-                "historical_rates_fetch_error",
-                extra={
-                    "from_currency": from_currency,
-                    "to_currency": to_currency,
-                    "days": days,
-                    "error": str(e),
-                },
-            )
-            return None
+            self.logger.debug(f"simulated_data_failed: {e}")
+        
+        return None
 
 
 def main():

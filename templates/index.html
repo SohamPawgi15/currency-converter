@@ -144,6 +144,15 @@
             font-size: 0.9em;
         }
 
+        /* Chart container */
+        .chart-wrapper {
+            margin-top: 20px;
+            background: #fff;
+            border-radius: 12px;
+            padding: 16px;
+            border: 1px solid #e1e5e9;
+        }
+
         .error {
             background: #fee;
             color: #c33;
@@ -382,6 +391,9 @@
             <h3>Conversion Result</h3>
             <div class="conversion-text" id="conversionText"></div>
             <div class="exchange-rate" id="exchangeRate"></div>
+            <div class="chart-wrapper" id="chartWrapper" style="display:none;">
+                <canvas id="historyChart" height="160"></canvas>
+            </div>
         </div>
 
         <div class="currency-grid">
@@ -395,6 +407,7 @@
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
         document.getElementById('converterForm').addEventListener('submit', async function(e) {
             e.preventDefault();
@@ -435,6 +448,9 @@
                     document.getElementById('exchangeRate').textContent = 
                         `Exchange Rate: 1 ${fromCurrency} = ${data.exchange_rate} ${toCurrency}`;
                     document.getElementById('result').classList.add('show');
+
+                    // Load historical chart
+                    await loadHistoryChart(fromCurrency, toCurrency);
                 } else {
                     // Show error
                     document.getElementById('error').textContent = data.error;
@@ -509,6 +525,53 @@
                 }
             }
         });
+
+        let historyChart;
+        async function loadHistoryChart(fromCurrency, toCurrency) {
+            try {
+                const res = await fetch(`/history?from_currency=${encodeURIComponent(fromCurrency)}&to_currency=${encodeURIComponent(toCurrency)}&days=30`);
+                const payload = await res.json();
+                if (!res.ok || payload.error) {
+                    document.getElementById('chartWrapper').style.display = 'none';
+                    return;
+                }
+                const labels = payload.dates;
+                const data = payload.rates;
+                const ctx = document.getElementById('historyChart').getContext('2d');
+                if (historyChart) {
+                    historyChart.destroy();
+                }
+                historyChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels,
+                        datasets: [{
+                            label: `30-day rate: ${fromCurrency} -> ${toCurrency}`,
+                            data,
+                            borderColor: '#667eea',
+                            backgroundColor: 'rgba(102, 126, 234, 0.2)',
+                            tension: 0.2,
+                            pointRadius: 0,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { display: true },
+                            y: { display: true }
+                        },
+                        plugins: {
+                            legend: { display: true },
+                            tooltip: { mode: 'index', intersect: false }
+                        }
+                    }
+                });
+                document.getElementById('chartWrapper').style.display = 'block';
+            } catch (err) {
+                document.getElementById('chartWrapper').style.display = 'none';
+            }
+        }
     </script>
 </body>
 </html>

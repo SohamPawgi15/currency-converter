@@ -1,6 +1,9 @@
 import requests
 import json
-from typing import Dict, Optional, Tuple
+import logging
+import time
+from datetime import datetime, timedelta
+from typing import Dict, Optional, Tuple, List
 import os
 from dotenv import load_dotenv
 
@@ -14,7 +17,16 @@ class CurrencyConverter:
     
     def __init__(self):
         self.base_url = "https://api.exchangerate-api.com/v4/latest"
+        # Historical data provider (no key required)
+        self.history_base_url = "https://api.exchangerate.host/timeseries"
         self.api_key = os.getenv('EXCHANGE_RATE_API_KEY')  # Optional API key for higher limits
+        self.session = requests.Session()
+        # Cache: base_currency -> (fetched_at_unix, payload)
+        self.cache_ttl_seconds = int(os.getenv('RATES_CACHE_TTL', '3600'))
+        self._rates_cache: Dict[str, Tuple[float, Dict]] = {}
+        # Logger
+        self.logger = logging.getLogger(__name__)
+
         self.supported_currencies = {
             'USD': 'US Dollar',
             'EUR': 'Euro',
@@ -48,16 +60,39 @@ class CurrencyConverter:
         Returns:
             Optional[Dict]: Exchange rates data or None if request fails
         """
+        base_currency = base_currency.upper()
+
+        # Serve from cache if fresh
+        cached = self._rates_cache.get(base_currency)
+        now = time.time()
+        if cached:
+            fetched_at, payload = cached
+            if now - fetched_at < self.cache_ttl_seconds:
+                return payload
+
         try:
-            url = f"{self.base_url}/{base_currency.upper()}"
-            response = requests.get(url, timeout=10)
+            url = f"{self.base_url}/{base_currency}"
+            response = self.session.get(url, timeout=10)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            # Cache on success
+            self._rates_cache[base_currency] = (now, data)
+            return data
         except requests.RequestException as e:
-            print(f"Error fetching exchange rates: {e}")
+            self.logger.warning(
+                "exchange_rates_fetch_error",
+                extra={"base_currency": base_currency, "error": str(e)}
+            )
+            # Fallback to stale cache if present
+            if cached:
+                self.logger.info("using_stale_rates_cache", extra={"base_currency": base_currency})
+                return cached[1]
             return None
         except json.JSONDecodeError as e:
-            print(f"Error parsing JSON response: {e}")
+            self.logger.error(
+                "exchange_rates_json_decode_error",
+                extra={"base_currency": base_currency, "error": str(e)}
+            )
             return None
     
     def convert_currency(self, amount: float, from_currency: str, to_currency: str) -> Optional[float]:
@@ -74,34 +109,38 @@ class CurrencyConverter:
         """
         # Validate input
         if amount <= 0:
-            print("Amount must be positive")
+            self.logger.info("invalid_amount", extra={"amount": amount})
             return None
-        
+
         from_currency = from_currency.upper()
         to_currency = to_currency.upper()
-        
+
+        # Same-currency short-circuit
+        if from_currency == to_currency:
+            return round(float(amount), 2)
+
         if from_currency not in self.supported_currencies:
-            print(f"Unsupported source currency: {from_currency}")
+            self.logger.info("unsupported_source_currency", extra={"from_currency": from_currency})
             return None
-        
+
         if to_currency not in self.supported_currencies:
-            print(f"Unsupported target currency: {to_currency}")
+            self.logger.info("unsupported_target_currency", extra={"to_currency": to_currency})
             return None
-        
+
         # Get exchange rates
         rates_data = self.get_exchange_rates(from_currency)
         if not rates_data:
             return None
-        
+
         rates = rates_data.get('rates', {})
         if to_currency not in rates:
-            print(f"Exchange rate not available for {to_currency}")
+            self.logger.info("missing_exchange_rate", extra={"to_currency": to_currency})
             return None
-        
+
         # Perform conversion
         exchange_rate = rates[to_currency]
         converted_amount = amount * exchange_rate
-        
+
         return round(converted_amount, 2)
     
     def get_supported_currencies(self) -> Dict[str, str]:
@@ -154,6 +193,55 @@ class CurrencyConverter:
             return f"{symbol}{amount:,.0f}"
         else:
             return f"{symbol}{amount:,.2f}"
+
+    def get_historical_rates(self, from_currency: str, to_currency: str, days: int = 30) -> Optional[Tuple[List[str], List[float]]]:
+        """
+        Fetch historical exchange rates for the given currency pair.
+
+        Returns a tuple of (dates, rates) where dates are ISO strings and rates are floats,
+        ordered chronologically across the requested days.
+        """
+        from_currency = from_currency.upper()
+        to_currency = to_currency.upper()
+
+        if from_currency not in self.supported_currencies or to_currency not in self.supported_currencies:
+            return None
+
+        try:
+            end_date = datetime.utcnow().date()
+            start_date = end_date - timedelta(days=days - 1)
+            params = {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "base": from_currency,
+                "symbols": to_currency,
+            }
+            response = self.session.get(self.history_base_url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if not data or not data.get("rates"):
+                return None
+
+            rate_map: Dict[str, float] = {}
+            for date_str, rate_obj in data.get("rates", {}).items():
+                rate_value = rate_obj.get(to_currency)
+                if rate_value is not None:
+                    rate_map[date_str] = float(rate_value)
+
+            dates_sorted = sorted(rate_map.keys())
+            rates_sorted = [rate_map[d] for d in dates_sorted]
+            return dates_sorted, rates_sorted
+        except Exception as e:
+            self.logger.warning(
+                "historical_rates_fetch_error",
+                extra={
+                    "from_currency": from_currency,
+                    "to_currency": to_currency,
+                    "days": days,
+                    "error": str(e),
+                },
+            )
+            return None
 
 
 def main():

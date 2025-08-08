@@ -2,8 +2,14 @@ from flask import Flask, render_template, request, jsonify
 from currency_converter import CurrencyConverter
 import json
 import os
+import logging
 
 app = Flask(__name__)
+# Basic structured logging setup
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format='%(asctime)s %(levelname)s %(name)s %(message)s'
+)
 converter = CurrencyConverter()
 
 @app.route('/')
@@ -50,6 +56,36 @@ def get_currencies():
     """API endpoint to get supported currencies."""
     currencies = converter.get_supported_currencies()
     return jsonify(currencies)
+
+@app.route('/history')
+def get_history():
+    """API endpoint to get historical exchange rates for a pair.
+
+    Query params:
+      - from_currency
+      - to_currency
+      - days (optional, default 30)
+    """
+    from_currency = request.args.get('from_currency', '')
+    to_currency = request.args.get('to_currency', '')
+    try:
+        days = int(request.args.get('days', '30'))
+        days = max(2, min(days, 365))
+    except ValueError:
+        days = 30
+
+    result = converter.get_historical_rates(from_currency, to_currency, days)
+    if not result:
+        return jsonify({'error': 'Could not fetch historical rates'}), 400
+
+    dates, rates = result
+    return jsonify({
+        'from_currency': from_currency.upper(),
+        'to_currency': to_currency.upper(),
+        'days': days,
+        'dates': dates,
+        'rates': rates,
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
